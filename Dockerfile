@@ -6,7 +6,7 @@ RUN npm install -g pnpm && pnpm install
 COPY admin-ui ./
 RUN pnpm build
 
-FROM rust:1.92-alpine AS builder
+FROM rust:1.82-alpine AS builder
 
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static
 
@@ -21,11 +21,22 @@ FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates
 
+# 创建非 root 用户 (HuggingFace Spaces 要求)
+RUN adduser -D -u 1000 appuser
+
 WORKDIR /app
+
 COPY --from=builder /app/target/release/kiro-rs /app/kiro-rs
+COPY entrypoint.sh /app/entrypoint.sh
 
-VOLUME ["/app/config"]
+# 创建配置目录并设置权限
+RUN mkdir -p /app/config && \
+    chown -R appuser:appuser /app && \
+    chmod +x /app/entrypoint.sh
 
-EXPOSE 8990
+USER appuser
 
-CMD ["./kiro-rs", "-c", "/app/config/config.json", "--credentials", "/app/config/credentials.json"]
+# HuggingFace Spaces 只支持端口 7860
+EXPOSE 7860
+
+ENTRYPOINT ["/app/entrypoint.sh"]
