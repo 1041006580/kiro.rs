@@ -340,6 +340,44 @@ kiro-rs/
    Authorization: Bearer sk-your-api-key
    ```
 
+## HuggingFace Spaces 部署
+
+本项目支持部署到 HuggingFace Spaces。通过环境变量配置：
+
+### 必需的环境变量
+
+| 变量名 | 说明 | 示例 |
+|--------|------|------|
+| `REFRESH_TOKEN` | Kiro 刷新令牌 | `your-refresh-token` |
+| `API_KEY` | API 访问密钥 | `sk-kiro-rs-your-key` |
+
+### 可选的环境变量
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `REGION` | AWS 区域 | `us-east-1` |
+| `EXPIRES_AT` | Token 过期时间 | `2020-01-01T00:00:00.000Z` |
+| `AUTH_METHOD` | 认证方式 (social/idc) | `social` |
+| `CLIENT_ID` | IdC 客户端 ID（仅 idc 模式） | - |
+| `CLIENT_SECRET` | IdC 客户端密钥（仅 idc 模式） | - |
+| `ADMIN_API_KEY` | Admin API 密钥（启用管理界面） | - |
+
+### 启用 Admin 管理界面
+
+在 HuggingFace Space 的 Settings → Variables 中添加：
+- `ADMIN_API_KEY`: 设置一个安全的密钥（如 `sk-admin-your-secret-key`）
+
+启用后可访问：
+- Admin UI: `https://your-space.hf.space/admin`
+- Admin API: `https://your-space.hf.space/api/admin/*`
+
+通过 Admin 界面可以：
+- 查看所有凭据状态
+- 动态添加/删除凭据
+- 调整凭据优先级
+- 启用/禁用凭据
+- 查看余额信息
+
 ## 环境变量
 
 可通过环境变量配置日志级别：
