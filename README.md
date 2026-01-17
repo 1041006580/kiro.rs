@@ -345,14 +345,20 @@ kiro-rs/
 
 本项目支持部署到 HuggingFace Spaces。通过环境变量配置：
 
-### 必需的环境变量
+### 凭据配置模式
+
+支持两种凭据配置模式：
+
+#### 模式1：单凭据模式（简单）
+
+**必需的环境变量**：
 
 | 变量名 | 说明 | 示例 |
 |--------|------|------|
 | `REFRESH_TOKEN` | Kiro 刷新令牌 | `your-refresh-token` |
 | `API_KEY` | API 访问密钥 | `sk-kiro-rs-your-key` |
 
-### 可选的环境变量
+**可选的环境变量**：
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
@@ -361,6 +367,47 @@ kiro-rs/
 | `AUTH_METHOD` | 认证方式 (social/idc) | `social` |
 | `CLIENT_ID` | IdC 客户端 ID（仅 idc 模式） | - |
 | `CLIENT_SECRET` | IdC 客户端密钥（仅 idc 模式） | - |
+| `ADMIN_API_KEY` | Admin API 密钥（启用管理界面） | - |
+
+#### 模式2：多凭据模式（高级）
+
+使用 `CREDENTIALS_JSON` 环境变量传入完整的凭据数组（JSON格式）：
+
+**必需的环境变量**：
+
+| 变量名 | 说明 | 示例 |
+|--------|------|------|
+| `CREDENTIALS_JSON` | 凭据JSON数组 | 见下方示例 |
+| `API_KEY` | API 访问密钥 | `sk-kiro-rs-your-key` |
+
+**CREDENTIALS_JSON 示例**：
+
+```json
+[
+  {
+    "refreshToken": "第一个凭据的刷新token",
+    "expiresAt": "2025-12-31T02:32:45.144Z",
+    "authMethod": "social",
+    "priority": 0
+  },
+  {
+    "refreshToken": "第二个凭据的刷新token",
+    "expiresAt": "2025-12-31T02:32:45.144Z",
+    "authMethod": "idc",
+    "clientId": "xxxxxxxxx",
+    "clientSecret": "xxxxxxxxx",
+    "priority": 1
+  }
+]
+```
+
+**注意**：在HuggingFace Space设置环境变量时，需要将JSON压缩成一行，去掉换行符。
+
+**其他可选环境变量**：
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `REGION` | AWS 区域 | `us-east-1` |
 | `ADMIN_API_KEY` | Admin API 密钥（启用管理界面） | - |
 
 ### 启用 Admin 管理界面

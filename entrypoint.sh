@@ -25,18 +25,18 @@ EOF
 fi
 
 # 从环境变量生成 credentials.json
-# 支持单凭据模式
-cat > /app/config/credentials.json << EOF
-{
-  "refreshToken": "${REFRESH_TOKEN}",
-  "expiresAt": "${EXPIRES_AT:-2020-01-01T00:00:00.000Z}",
-  "authMethod": "${AUTH_METHOD:-social}"
-}
-EOF
+# 支持两种模式：
+# 1. 多凭据模式：通过 CREDENTIALS_JSON 环境变量传入完整的 JSON 数组
+# 2. 单凭据模式：通过单独的环境变量（向后兼容）
 
-# 如果是 IdC 模式，需要添加 clientId 和 clientSecret
-if [ "${AUTH_METHOD}" = "idc" ]; then
-  cat > /app/config/credentials.json << EOF
+if [ -n "${CREDENTIALS_JSON}" ]; then
+  # 多凭据模式：直接使用 CREDENTIALS_JSON
+  echo "${CREDENTIALS_JSON}" > /app/config/credentials.json
+  echo "Using multi-credential mode from CREDENTIALS_JSON"
+else
+  # 单凭据模式
+  if [ "${AUTH_METHOD}" = "idc" ]; then
+    cat > /app/config/credentials.json << EOF
 {
   "refreshToken": "${REFRESH_TOKEN}",
   "expiresAt": "${EXPIRES_AT:-2020-01-01T00:00:00.000Z}",
@@ -45,6 +45,16 @@ if [ "${AUTH_METHOD}" = "idc" ]; then
   "clientSecret": "${CLIENT_SECRET}"
 }
 EOF
+  else
+    cat > /app/config/credentials.json << EOF
+{
+  "refreshToken": "${REFRESH_TOKEN}",
+  "expiresAt": "${EXPIRES_AT:-2020-01-01T00:00:00.000Z}",
+  "authMethod": "${AUTH_METHOD:-social}"
+}
+EOF
+  fi
+  echo "Using single-credential mode"
 fi
 
 echo "Starting kiro-rs..."
