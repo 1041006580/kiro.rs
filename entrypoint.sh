@@ -1,7 +1,20 @@
 #!/bin/sh
 
 # 从环境变量生成 config.json
-cat > /app/config/config.json << EOF
+if [ -n "${ADMIN_API_KEY}" ]; then
+  # 如果设置了 ADMIN_API_KEY，包含在配置中
+  cat > /app/config/config.json << EOF
+{
+  "host": "0.0.0.0",
+  "port": 7860,
+  "apiKey": "${API_KEY:-sk-kiro-rs-default}",
+  "region": "${REGION:-us-east-1}",
+  "adminApiKey": "${ADMIN_API_KEY}"
+}
+EOF
+else
+  # 否则不包含 adminApiKey
+  cat > /app/config/config.json << EOF
 {
   "host": "0.0.0.0",
   "port": 7860,
@@ -9,6 +22,7 @@ cat > /app/config/config.json << EOF
   "region": "${REGION:-us-east-1}"
 }
 EOF
+fi
 
 # 从环境变量生成 credentials.json
 # 支持单凭据模式
