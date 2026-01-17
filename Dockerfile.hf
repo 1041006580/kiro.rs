@@ -1,0 +1,10 @@
+# HuggingFace Space Dockerfile
+# 使用 GitHub Container Registry 的预构建镜像
+
+FROM ghcr.io/1041006580/kiro.rs:latest
+
+# HuggingFace Spaces 只支持端口 7860
+EXPOSE 7860
+
+# 使用原有的 entrypoint
+ENTRYPOINT ["/app/entrypoint.sh"]
