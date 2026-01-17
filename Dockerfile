@@ -6,7 +6,7 @@ RUN npm install -g pnpm && pnpm install
 COPY admin-ui ./
 RUN pnpm build
 
-FROM rust:1.82-alpine AS builder
+FROM rust:1.85-alpine AS builder
 
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static
 
