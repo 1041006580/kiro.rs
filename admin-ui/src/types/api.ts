@@ -16,6 +16,10 @@ export interface CredentialStatusItem {
   expiresAt: string | null
   authMethod: string | null
   hasProfileArn: boolean
+  email?: string
+  refreshTokenHash?: string
+  successCount: number
+  lastUsedAt: string | null
 }
 
 // 余额响应
@@ -60,6 +64,7 @@ export interface AddCredentialRequest {
   clientSecret?: string
   priority?: number
   region?: string
+  machineId?: string
 }
 
 // 添加凭据响应
@@ -67,4 +72,5 @@ export interface AddCredentialResponse {
   success: boolean
   message: string
   credentialId: number
+  email?: string
 }
