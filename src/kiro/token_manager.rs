@@ -171,8 +171,8 @@ async fn refresh_social_token(
     tracing::info!("正在刷新 Social Token...");
 
     let refresh_token = credentials.refresh_token.as_ref().unwrap();
-    // 优先使用凭据级 region，未配置时回退到 config.region
-    let region = credentials.region.as_ref().unwrap_or(&config.region);
+    // 优先级：凭据.auth_region > 凭据.region > config.auth_region > config.region
+    let region = credentials.effective_auth_region(config);
 
     let refresh_url = format!("https://prod.{}.auth.desktop.kiro.dev/refreshToken", region);
     let refresh_domain = format!("prod.{}.auth.desktop.kiro.dev", region);
@@ -255,8 +255,8 @@ async fn refresh_idc_token(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("IdC 刷新需要 clientSecret"))?;
 
-    // 优先使用凭据级 region，未配置时回退到 config.region
-    let region = credentials.region.as_ref().unwrap_or(&config.region);
+    // 优先级：凭据.auth_region > 凭据.region > config.auth_region > config.region
+    let region = credentials.effective_auth_region(config);
     let refresh_url = format!("https://oidc.{}.amazonaws.com/token", region);
 
     let client = build_client(proxy, 60, config.tls_backend)?;
@@ -324,7 +324,8 @@ pub(crate) async fn get_usage_limits(
 ) -> anyhow::Result<UsageLimitsResponse> {
     tracing::debug!("正在获取使用额度信息...");
 
-    let region = &config.region;
+    // 优先级：凭据.api_region > config.api_region > config.region
+    let region = credentials.effective_api_region(config);
     let host = format!("q.{}.amazonaws.com", region);
     let machine_id = machine_id::generate_from_credentials(credentials, config)
         .ok_or_else(|| anyhow::anyhow!("无法生成 machineId"))?;
@@ -453,6 +454,11 @@ pub struct CredentialEntrySnapshot {
     pub success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     pub last_used_at: Option<String>,
+    /// 是否配置了凭据级代理
+    pub has_proxy: bool,
+    /// 代理 URL（用于前端展示）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
 }
 
 /// 凭据管理器状态快照
@@ -557,10 +563,14 @@ impl MultiTokenManager {
                 }
                 CredentialEntry {
                     id,
-                    credentials: cred,
+                    credentials: cred.clone(),
                     failure_count: 0,
-                    disabled: false,
-                    disabled_reason: None,
+                    disabled: cred.disabled, // 从配置文件读取 disabled 状态
+                    disabled_reason: if cred.disabled {
+                        Some(DisabledReason::Manual)
+                    } else {
+                        None
+                    },
                     success_count: 0,
                     last_used_at: None,
                 }
@@ -645,9 +655,31 @@ impl MultiTokenManager {
     ///
     /// - priority 模式：选择优先级最高（priority 最小）的可用凭据
     /// - balanced 模式：轮询选择可用凭据
-    fn select_next_credential(&self) -> Option<(u64, KiroCredentials)> {
+    ///
+    /// # 参数
+    /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
+    fn select_next_credential(&self, model: Option<&str>) -> Option<(u64, KiroCredentials)> {
         let entries = self.entries.lock();
-        let available: Vec<_> = entries.iter().filter(|e| !e.disabled).collect();
+
+        // 检查是否是 opus 模型
+        let is_opus = model
+            .map(|m| m.to_lowercase().contains("opus"))
+            .unwrap_or(false);
+
+        // 过滤可用凭据
+        let available: Vec<_> = entries
+            .iter()
+            .filter(|e| {
+                if e.disabled {
+                    return false;
+                }
+                // 如果是 opus 模型，需要检查订阅等级
+                if is_opus && !e.credentials.supports_opus() {
+                    return false;
+                }
+                true
+            })
+            .collect();
 
         if available.is_empty() {
             return None;
@@ -681,7 +713,10 @@ impl MultiTokenManager {
     ///
     /// 如果 Token 过期或即将过期，会自动刷新
     /// Token 刷新失败时会尝试下一个可用凭据（不计入失败次数）
-    pub async fn acquire_context(&self) -> anyhow::Result<CallContext> {
+    ///
+    /// # 参数
+    /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
+    pub async fn acquire_context(&self, model: Option<&str>) -> anyhow::Result<CallContext> {
         let total = self.total_count();
         let mut tried_count = 0;
 
@@ -714,7 +749,7 @@ impl MultiTokenManager {
                     hit
                 } else {
                     // 当前凭据不可用或 balanced 模式，根据负载均衡策略选择
-                    let mut best = self.select_next_credential();
+                    let mut best = self.select_next_credential(model);
 
                     // 没有可用凭据：如果是"自动禁用导致全灭"，做一次类似重启的自愈
                     if best.is_none() {
@@ -733,7 +768,7 @@ impl MultiTokenManager {
                                 }
                             }
                             drop(entries);
-                            best = self.select_next_credential();
+                            best = self.select_next_credential(model);
                         }
                     }
 
@@ -846,8 +881,9 @@ impl MultiTokenManager {
 
             if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
                 // 确实需要刷新
+                let effective_proxy = current_creds.effective_proxy(self.proxy.as_ref());
                 let new_creds =
-                    refresh_token(&current_creds, &self.config, self.proxy.as_ref()).await?;
+                    refresh_token(&current_creds, &self.config, effective_proxy.as_ref()).await?;
 
                 if is_token_expired(&new_creds) {
                     anyhow::bail!("刷新后的 Token 仍然无效或已过期");
@@ -919,6 +955,8 @@ impl MultiTokenManager {
                 .map(|e| {
                     let mut cred = e.credentials.clone();
                     cred.canonicalize_auth_method();
+                    // 同步 disabled 状态到凭据对象
+                    cred.disabled = e.disabled;
                     cred
                 })
                 .collect()
@@ -1193,12 +1231,13 @@ impl MultiTokenManager {
 
     /// 获取使用额度信息
     pub async fn get_usage_limits(&self) -> anyhow::Result<UsageLimitsResponse> {
-        let ctx = self.acquire_context().await?;
+        let ctx = self.acquire_context(None).await?;
+        let effective_proxy = ctx.credentials.effective_proxy(self.proxy.as_ref());
         get_usage_limits(
             &ctx.credentials,
             &self.config,
             &ctx.token,
-            self.proxy.as_ref(),
+            effective_proxy.as_ref(),
         )
         .await
     }
@@ -1234,6 +1273,8 @@ impl MultiTokenManager {
                     email: e.credentials.email.clone(),
                     success_count: e.success_count,
                     last_used_at: e.last_used_at.clone(),
+                    has_proxy: e.credentials.proxy_url.is_some(),
+                    proxy_url: e.credentials.proxy_url.clone(),
                 })
                 .collect(),
             current_id,
@@ -1327,8 +1368,9 @@ impl MultiTokenManager {
             };
 
             if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
+                let effective_proxy = current_creds.effective_proxy(self.proxy.as_ref());
                 let new_creds =
-                    refresh_token(&current_creds, &self.config, self.proxy.as_ref()).await?;
+                    refresh_token(&current_creds, &self.config, effective_proxy.as_ref()).await?;
                 {
                     let mut entries = self.entries.lock();
                     if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
@@ -1362,7 +1404,41 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
 
-        get_usage_limits(&credentials, &self.config, &token, self.proxy.as_ref()).await
+        let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
+        let usage_limits = get_usage_limits(&credentials, &self.config, &token, effective_proxy.as_ref()).await?;
+
+        // 更新订阅等级到凭据（仅在发生变化时持久化）
+        if let Some(subscription_title) = usage_limits.subscription_title() {
+            let changed = {
+                let mut entries = self.entries.lock();
+                if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+                    let old_title = entry.credentials.subscription_title.clone();
+                    if old_title.as_deref() != Some(subscription_title) {
+                        entry.credentials.subscription_title =
+                            Some(subscription_title.to_string());
+                        tracing::info!(
+                            "凭据 #{} 订阅等级已更新: {:?} -> {}",
+                            id,
+                            old_title,
+                            subscription_title
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+
+            if changed {
+                if let Err(e) = self.persist_credentials() {
+                    tracing::warn!("订阅等级更新后持久化失败（不影响本次请求）: {}", e);
+                }
+            }
+        }
+
+        Ok(usage_limits)
     }
 
     /// 添加新凭据（Admin API）
@@ -1405,8 +1481,9 @@ impl MultiTokenManager {
         }
 
         // 3. 尝试刷新 Token 验证凭据有效性
+        let effective_proxy = new_cred.effective_proxy(self.proxy.as_ref());
         let mut validated_cred =
-            refresh_token(&new_cred, &self.config, self.proxy.as_ref()).await?;
+            refresh_token(&new_cred, &self.config, effective_proxy.as_ref()).await?;
 
         // 4. 分配新 ID
         let new_id = {
@@ -1427,8 +1504,13 @@ impl MultiTokenManager {
         validated_cred.client_id = new_cred.client_id;
         validated_cred.client_secret = new_cred.client_secret;
         validated_cred.region = new_cred.region;
+        validated_cred.auth_region = new_cred.auth_region;
+        validated_cred.api_region = new_cred.api_region;
         validated_cred.machine_id = new_cred.machine_id;
         validated_cred.email = new_cred.email;
+        validated_cred.proxy_url = new_cred.proxy_url;
+        validated_cred.proxy_username = new_cred.proxy_username;
+        validated_cred.proxy_password = new_cred.proxy_password;
 
         {
             let mut entries = self.entries.lock();
@@ -1838,7 +1920,7 @@ mod tests {
         assert_eq!(manager.available_count(), 0);
 
         // 应触发自愈：重置失败计数并重新启用，避免必须重启进程
-        let ctx = manager.acquire_context().await.unwrap();
+        let ctx = manager.acquire_context(None).await.unwrap();
         assert!(ctx.token == "t1" || ctx.token == "t2");
         assert_eq!(manager.available_count(), 2);
     }
@@ -1875,7 +1957,7 @@ mod tests {
         manager.report_quota_exhausted(2);
         assert_eq!(manager.available_count(), 0);
 
-        let err = manager.acquire_context().await.err().unwrap().to_string();
+        let err = manager.acquire_context(None).await.err().unwrap().to_string();
         assert!(
             err.contains("所有凭据均已禁用"),
             "错误应提示所有凭据禁用，实际: {}",
@@ -1886,87 +1968,90 @@ mod tests {
 
     // ============ 凭据级 Region 优先级测试 ============
 
-    /// 辅助函数：获取 OIDC 刷新使用的 region（用于测试）
-    fn get_oidc_region_for_credential<'a>(
-        credentials: &'a KiroCredentials,
-        config: &'a Config,
-    ) -> &'a str {
-        credentials.region.as_ref().unwrap_or(&config.region)
-    }
-
     #[test]
-    fn test_credential_region_priority_uses_credential_region() {
-        // 凭据配置了 region 时，应使用凭据的 region
+    fn test_credential_region_priority_uses_credential_auth_region() {
+        // 凭据配置了 auth_region 时，应使用凭据的 auth_region
         let mut config = Config::default();
         config.region = "us-west-2".to_string();
 
         let mut credentials = KiroCredentials::default();
-        credentials.region = Some("eu-west-1".to_string());
+        credentials.auth_region = Some("eu-west-1".to_string());
 
-        let region = get_oidc_region_for_credential(&credentials, &config);
+        let region = credentials.effective_auth_region(&config);
         assert_eq!(region, "eu-west-1");
     }
 
     #[test]
-    fn test_credential_region_priority_fallback_to_config() {
-        // 凭据未配置 region 时，应回退到 config.region
-        let mut config = Config::default();
-        config.region = "us-west-2".to_string();
-
-        let credentials = KiroCredentials::default();
-        assert!(credentials.region.is_none());
-
-        let region = get_oidc_region_for_credential(&credentials, &config);
-        assert_eq!(region, "us-west-2");
-    }
-
-    #[test]
-    fn test_multiple_credentials_use_respective_regions() {
-        // 多凭据场景下，不同凭据使用各自的 region
-        let mut config = Config::default();
-        config.region = "ap-northeast-1".to_string();
-
-        let mut cred1 = KiroCredentials::default();
-        cred1.region = Some("us-east-1".to_string());
-
-        let mut cred2 = KiroCredentials::default();
-        cred2.region = Some("eu-west-1".to_string());
-
-        let cred3 = KiroCredentials::default(); // 无 region，使用 config
-
-        assert_eq!(get_oidc_region_for_credential(&cred1, &config), "us-east-1");
-        assert_eq!(get_oidc_region_for_credential(&cred2, &config), "eu-west-1");
-        assert_eq!(
-            get_oidc_region_for_credential(&cred3, &config),
-            "ap-northeast-1"
-        );
-    }
-
-    #[test]
-    fn test_idc_oidc_endpoint_uses_credential_region() {
-        // 验证 IdC OIDC endpoint URL 使用凭据 region
+    fn test_credential_region_priority_fallback_to_credential_region() {
+        // 凭据未配置 auth_region 但配置了 region 时，应回退到凭据.region
         let mut config = Config::default();
         config.region = "us-west-2".to_string();
 
         let mut credentials = KiroCredentials::default();
         credentials.region = Some("eu-central-1".to_string());
 
-        let region = get_oidc_region_for_credential(&credentials, &config);
+        let region = credentials.effective_auth_region(&config);
+        assert_eq!(region, "eu-central-1");
+    }
+
+    #[test]
+    fn test_credential_region_priority_fallback_to_config() {
+        // 凭据未配置 auth_region 和 region 时，应回退到 config
+        let mut config = Config::default();
+        config.region = "us-west-2".to_string();
+
+        let credentials = KiroCredentials::default();
+        assert!(credentials.auth_region.is_none());
+        assert!(credentials.region.is_none());
+
+        let region = credentials.effective_auth_region(&config);
+        assert_eq!(region, "us-west-2");
+    }
+
+    #[test]
+    fn test_multiple_credentials_use_respective_regions() {
+        // 多凭据场景下，不同凭据使用各自的 auth_region
+        let mut config = Config::default();
+        config.region = "ap-northeast-1".to_string();
+
+        let mut cred1 = KiroCredentials::default();
+        cred1.auth_region = Some("us-east-1".to_string());
+
+        let mut cred2 = KiroCredentials::default();
+        cred2.region = Some("eu-west-1".to_string());
+
+        let cred3 = KiroCredentials::default(); // 无 region，使用 config
+
+        assert_eq!(cred1.effective_auth_region(&config), "us-east-1");
+        assert_eq!(cred2.effective_auth_region(&config), "eu-west-1");
+        assert_eq!(cred3.effective_auth_region(&config), "ap-northeast-1");
+    }
+
+    #[test]
+    fn test_idc_oidc_endpoint_uses_credential_auth_region() {
+        // 验证 IdC OIDC endpoint URL 使用凭据 auth_region
+        let mut config = Config::default();
+        config.region = "us-west-2".to_string();
+
+        let mut credentials = KiroCredentials::default();
+        credentials.auth_region = Some("eu-central-1".to_string());
+
+        let region = credentials.effective_auth_region(&config);
         let refresh_url = format!("https://oidc.{}.amazonaws.com/token", region);
 
         assert_eq!(refresh_url, "https://oidc.eu-central-1.amazonaws.com/token");
     }
 
     #[test]
-    fn test_social_refresh_endpoint_uses_credential_region() {
-        // 验证 Social refresh endpoint URL 使用凭据 region
+    fn test_social_refresh_endpoint_uses_credential_auth_region() {
+        // 验证 Social refresh endpoint URL 使用凭据 auth_region
         let mut config = Config::default();
         config.region = "us-west-2".to_string();
 
         let mut credentials = KiroCredentials::default();
-        credentials.region = Some("ap-southeast-1".to_string());
+        credentials.auth_region = Some("ap-southeast-1".to_string());
 
-        let region = get_oidc_region_for_credential(&credentials, &config);
+        let region = credentials.effective_auth_region(&config);
         let refresh_url = format!("https://prod.{}.auth.desktop.kiro.dev/refreshToken", region);
 
         assert_eq!(
@@ -1976,35 +2061,61 @@ mod tests {
     }
 
     #[test]
-    fn test_api_call_still_uses_config_region() {
-        // 验证 API 调用（如 getUsageLimits）仍使用 config.region
-        // 这确保只有 OIDC 刷新使用凭据 region，API 调用行为不变
+    fn test_api_call_uses_effective_api_region() {
+        // 验证 API 调用使用 effective_api_region
         let mut config = Config::default();
         config.region = "us-west-2".to_string();
 
         let mut credentials = KiroCredentials::default();
         credentials.region = Some("eu-west-1".to_string());
 
-        // API 调用应使用 config.region，而非 credentials.region
-        let api_region = &config.region;
+        // 凭据.region 不参与 api_region 回退链
+        let api_region = credentials.effective_api_region(&config);
         let api_host = format!("q.{}.amazonaws.com", api_region);
 
         assert_eq!(api_host, "q.us-west-2.amazonaws.com");
-        // 确认凭据 region 不影响 API 调用
-        assert_ne!(api_region, credentials.region.as_ref().unwrap());
     }
 
     #[test]
-    fn test_credential_region_empty_string_treated_as_set() {
-        // 空字符串 region 被视为已设置（虽然不推荐，但行为应一致）
+    fn test_api_call_uses_credential_api_region() {
+        // 凭据配置了 api_region 时，API 调用应使用凭据的 api_region
         let mut config = Config::default();
         config.region = "us-west-2".to_string();
 
         let mut credentials = KiroCredentials::default();
-        credentials.region = Some("".to_string());
+        credentials.api_region = Some("eu-central-1".to_string());
 
-        let region = get_oidc_region_for_credential(&credentials, &config);
+        let api_region = credentials.effective_api_region(&config);
+        let api_host = format!("q.{}.amazonaws.com", api_region);
+
+        assert_eq!(api_host, "q.eu-central-1.amazonaws.com");
+    }
+
+    #[test]
+    fn test_credential_region_empty_string_treated_as_set() {
+        // 空字符串 auth_region 被视为已设置（虽然不推荐，但行为应一致）
+        let mut config = Config::default();
+        config.region = "us-west-2".to_string();
+
+        let mut credentials = KiroCredentials::default();
+        credentials.auth_region = Some("".to_string());
+
+        let region = credentials.effective_auth_region(&config);
         // 空字符串被视为已设置，不会回退到 config
         assert_eq!(region, "");
+    }
+
+    #[test]
+    fn test_auth_and_api_region_independent() {
+        // auth_region 和 api_region 互不影响
+        let mut config = Config::default();
+        config.region = "default".to_string();
+
+        let mut credentials = KiroCredentials::default();
+        credentials.auth_region = Some("auth-only".to_string());
+        credentials.api_region = Some("api-only".to_string());
+
+        assert_eq!(credentials.effective_auth_region(&config), "auth-only");
+        assert_eq!(credentials.effective_api_region(&config), "api-only");
     }
 }
