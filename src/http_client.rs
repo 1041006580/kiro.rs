@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::model::config::TlsBackend;
 
 /// 代理配置
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ProxyConfig {
     /// 代理地址，支持 http/https/socks5
     pub url: String,
@@ -51,8 +51,20 @@ pub fn build_client(
 ) -> anyhow::Result<Client> {
     let mut builder = Client::builder().timeout(Duration::from_secs(timeout_secs));
 
-    if tls_backend == TlsBackend::Rustls {
-        builder = builder.use_rustls_tls();
+    match tls_backend {
+        TlsBackend::Rustls => {
+            builder = builder.use_rustls_tls();
+        }
+        TlsBackend::NativeTls => {
+            #[cfg(feature = "native-tls")]
+            {
+                builder = builder.use_native_tls();
+            }
+            #[cfg(not(feature = "native-tls"))]
+            {
+                anyhow::bail!("此构建版本未包含 native-tls 后端，请在配置中改用 rustls");
+            }
+        }
     }
 
     if let Some(proxy_config) = proxy {

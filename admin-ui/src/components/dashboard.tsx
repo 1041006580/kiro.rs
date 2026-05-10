@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, Trash2, RotateCcw, CheckCircle2 } from 'lucide-react'
+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -10,9 +10,10 @@ import { CredentialCard } from '@/components/credential-card'
 import { BalanceDialog } from '@/components/balance-dialog'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
+import { KamImportDialog } from '@/components/kam-import-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
 import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode } from '@/hooks/use-credentials'
-import { getCredentialBalance } from '@/api/credentials'
+import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import type { BalanceResponse } from '@/types/api'
 
@@ -25,6 +26,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [balanceDialogOpen, setBalanceDialogOpen] = useState(false)
   const [addDialogOpen, setAddDialogOpen] = useState(false)
   const [batchImportDialogOpen, setBatchImportDialogOpen] = useState(false)
+  const [kamImportDialogOpen, setKamImportDialogOpen] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [verifyDialogOpen, setVerifyDialogOpen] = useState(false)
   const [verifying, setVerifying] = useState(false)
@@ -34,6 +36,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [loadingBalanceIds, setLoadingBalanceIds] = useState<Set<number>>(new Set())
   const [queryingInfo, setQueryingInfo] = useState(false)
   const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
+  const [batchRefreshing, setBatchRefreshing] = useState(false)
+  const [batchRefreshProgress, setBatchRefreshProgress] = useState({ current: 0, total: 0 })
   const cancelVerifyRef = useRef(false)
   const [currentPage, setCurrentPage] = useState(1)
   const itemsPerPage = 12
@@ -237,6 +241,51 @@ export function Dashboard({ onLogout }: DashboardProps) {
       toast.success(`成功恢复 ${successCount} 个凭据`)
     } else {
       toast.warning(`成功 ${successCount} 个，失败 ${failCount} 个`)
+    }
+
+    deselectAll()
+  }
+
+  // 批量刷新 Token
+  const handleBatchForceRefresh = async () => {
+    if (selectedIds.size === 0) {
+      toast.error('请先选择要刷新的凭据')
+      return
+    }
+
+    const enabledIds = Array.from(selectedIds).filter(id => {
+      const cred = data?.credentials.find(c => c.id === id)
+      return cred && !cred.disabled
+    })
+
+    if (enabledIds.length === 0) {
+      toast.error('选中的凭据中没有启用的凭据')
+      return
+    }
+
+    setBatchRefreshing(true)
+    setBatchRefreshProgress({ current: 0, total: enabledIds.length })
+
+    let successCount = 0
+    let failCount = 0
+
+    for (let i = 0; i < enabledIds.length; i++) {
+      try {
+        await forceRefreshToken(enabledIds[i])
+        successCount++
+      } catch {
+        failCount++
+      }
+      setBatchRefreshProgress({ current: i + 1, total: enabledIds.length })
+    }
+
+    setBatchRefreshing(false)
+    queryClient.invalidateQueries({ queryKey: ['credentials'] })
+
+    if (failCount === 0) {
+      toast.success(`成功刷新 ${successCount} 个凭据的 Token`)
+    } else {
+      toast.warning(`刷新 Token：成功 ${successCount} 个，失败 ${failCount} 个`)
     }
 
     deselectAll()
@@ -578,6 +627,15 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     <CheckCircle2 className="h-4 w-4 mr-2" />
                     批量验活
                   </Button>
+                  <Button
+                    onClick={handleBatchForceRefresh}
+                    size="sm"
+                    variant="outline"
+                    disabled={batchRefreshing}
+                  >
+                    <RefreshCw className={`h-4 w-4 mr-2 ${batchRefreshing ? 'animate-spin' : ''}`} />
+                    {batchRefreshing ? `刷新中... ${batchRefreshProgress.current}/${batchRefreshProgress.total}` : '批量刷新 Token'}
+                  </Button>
                   <Button onClick={handleBatchResetFailure} size="sm" variant="outline">
                     <RotateCcw className="h-4 w-4 mr-2" />
                     恢复异常
@@ -624,6 +682,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   清除已禁用
                 </Button>
               )}
+              <Button onClick={() => setKamImportDialogOpen(true)} size="sm" variant="outline">
+                <FileUp className="h-4 w-4 mr-2" />
+                Kiro Account Manager 导入
+              </Button>
               <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="outline">
                 <Upload className="h-4 w-4 mr-2" />
                 批量导入
@@ -702,6 +764,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
       <BatchImportDialog
         open={batchImportDialogOpen}
         onOpenChange={setBatchImportDialogOpen}
+      />
+
+      {/* KAM 账号导入对话框 */}
+      <KamImportDialog
+        open={kamImportDialogOpen}
+        onOpenChange={setKamImportDialogOpen}
       />
 
       {/* 批量验活对话框 */}

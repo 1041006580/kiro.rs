@@ -2,6 +2,8 @@ name: Build Artifacts
 
 on:
   push:
+    branches:
+      - master
     tags:
       - 'v*'
   workflow_dispatch:
@@ -15,7 +17,28 @@ permissions:
   contents: read
 
 jobs:
+  pre-check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        with:
+          fetch-depth: 0
+      - name: Check if commit has release tag
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/heads/* ]] && git tag --points-at HEAD | grep -q '^v'; then
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            echo "::notice::Skipping beta build: commit already has a release tag"
+          else
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+
   build:
+    needs: pre-check
+    if: needs.pre-check.outputs.should_build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -35,12 +58,31 @@ jobs:
           - platform: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             name: Linux-arm64
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            name: Linux-musl-x64
+          - platform: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+            name: Linux-musl-arm64
 
     runs-on: ${{ matrix.platform }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-6)
+            echo "version=beta-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -71,13 +113,19 @@ jobs:
           shared-key: "rust-cache-${{ matrix.target }}"
           cache-on-failure: true
 
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
       - name: Build app
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} ${{ contains(matrix.target, 'musl') && '--no-default-features' || '' }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kiro-rs-${{ github.event.inputs.version || github.ref_name }}-${{ matrix.name }}
+          name: kiro-rs-${{ steps.version.outputs.version }}-${{ matrix.name }}
           if-no-files-found: error
           compression-level: 6
           path: |
