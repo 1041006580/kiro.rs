@@ -640,7 +640,7 @@ async fn handle_non_stream_request(
 
 /// 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
 ///
-/// - Opus 4.6：覆写为 adaptive 类型
+/// - Opus 4.6/4.7：覆写为 adaptive 类型，effort 为 high
 /// - 其他模型：覆写为 enabled 类型
 /// - budget_tokens 固定为 20000
 fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
@@ -649,10 +649,11 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         return;
     }
 
-    let is_opus_4_6 =
-        model_lower.contains("opus") && (model_lower.contains("4-6") || model_lower.contains("4.6"));
+    let is_opus_adaptive = model_lower.contains("opus")
+        && (model_lower.contains("4-6") || model_lower.contains("4.6")
+            || model_lower.contains("4-7") || model_lower.contains("4.7"));
 
-    let thinking_type = if is_opus_4_6 {
+    let thinking_type = if is_opus_adaptive {
         "adaptive"
     } else {
         "enabled"
@@ -668,8 +669,8 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         thinking_type: thinking_type.to_string(),
         budget_tokens: 20000,
     });
-    
-    if is_opus_4_6 {
+
+    if is_opus_adaptive {
         payload.output_config = Some(OutputConfig {
             effort: "high".to_string(),
         });
