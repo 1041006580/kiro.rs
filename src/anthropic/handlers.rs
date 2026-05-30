@@ -658,7 +658,7 @@ async fn handle_non_stream_request(
         stop_reason = %stop_reason,
         content_blocks = content.len(),
         text_len = text_content.len(),
-        tool_use_count = tool_uses.len(),
+        has_tool_use = has_tool_use,
         input_tokens = final_input_tokens,
         output_tokens = output_tokens,
         "非流式响应构建完成"
