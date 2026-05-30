@@ -471,6 +471,47 @@ impl SseStateManager {
             "流式响应即将结束"
         );
 
+        // 上游返回空响应保护：未产生任何 content block 且 stop_reason 仍为默认值时
+        // 注入一个文本块告知用户上游故障，避免 Claude Code 显示空白截断
+        let stop_reason_str = self.get_stop_reason();
+        let upstream_empty = self.active_blocks.is_empty()
+            && !self.has_tool_use
+            && (stop_reason_str == "end_turn" || stop_reason_str == "stop_sequence");
+        if upstream_empty {
+            tracing::error!(
+                input_tokens = input_tokens,
+                "流式上游返回空响应，注入错误文本块"
+            );
+            let err_index = self.next_block_index;
+            self.next_block_index += 1;
+            events.push(SseEvent::new(
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": err_index,
+                    "content_block": { "type": "text", "text": "" }
+                }),
+            ));
+            events.push(SseEvent::new(
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": err_index,
+                    "delta": {
+                        "type": "text_delta",
+                        "text": "[kiro-rs] 上游返回空响应：模型未生成任何内容（可能因输入过长或上游故障）。请尝试缩短对话历史或切换模型。"
+                    }
+                }),
+            ));
+            events.push(SseEvent::new(
+                "content_block_stop",
+                json!({
+                    "type": "content_block_stop",
+                    "index": err_index
+                }),
+            ));
+        }
+
         // 关闭所有未关闭的块
         for (index, block) in self.active_blocks.iter_mut() {
             if block.started && !block.stopped {

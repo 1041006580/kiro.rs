@@ -480,27 +480,71 @@ async fn handle_non_stream_request(
     thinking_enabled: bool,
     tool_name_map: std::collections::HashMap<String, String>,
 ) -> Response {
-    // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api(request_body).await {
-        Ok(resp) => resp,
-        Err(e) => return map_provider_error(e),
-    };
+    // 最多重试 3 次（应对上游返回空响应的情况）
+    let max_empty_retries = 3;
+    let mut body_bytes = bytes::Bytes::new();
 
-    // 读取响应体
-    let body_bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::error!("读取响应体失败: {}", e);
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse::new(
-                    "api_error",
-                    format!("读取响应失败: {}", e),
-                )),
-            )
-                .into_response();
+    for empty_attempt in 0..max_empty_retries {
+        // 调用 Kiro API（支持多凭据故障转移）
+        let response = match provider.call_api(request_body).await {
+            Ok(resp) => resp,
+            Err(e) => return map_provider_error(e),
+        };
+
+        // 读取响应体
+        body_bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!("读取响应体失败: {}", e);
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ErrorResponse::new(
+                        "api_error",
+                        format!("读取响应失败: {}", e),
+                    )),
+                )
+                    .into_response();
+            }
+        };
+
+        // 快速检查：如果响应体足够大（包含实际内容事件），跳出重试
+        // 空响应通常很小（只有 contextUsageEvent + meteringEvent，约几百字节）
+        if body_bytes.len() > 512 {
+            break;
         }
-    };
+
+        // 响应体很小，可能是空响应，先尝试解析确认
+        let mut has_content_event = false;
+        let mut check_decoder = EventStreamDecoder::new();
+        if check_decoder.feed(&body_bytes).is_ok() {
+            for result in check_decoder.decode_iter() {
+                if let Ok(frame) = result {
+                    if let Ok(event) = Event::from_frame(frame) {
+                        match event {
+                            Event::AssistantResponse(_) | Event::ToolUse(_) => {
+                                has_content_event = true;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        if has_content_event {
+            break;
+        }
+
+        if empty_attempt + 1 < max_empty_retries {
+            tracing::warn!(
+                model = model,
+                attempt = empty_attempt + 1,
+                body_len = body_bytes.len(),
+                "上游返回空响应（无 content 事件），重试换凭据"
+            );
+        }
+    }
 
     // 解析事件流
     let mut decoder = EventStreamDecoder::new();
@@ -631,6 +675,24 @@ async fn handle_non_stream_request(
     }
 
     content.extend(tool_uses);
+
+    // 上游返回空响应保护：内容块为空且未触发任何 stop_reason 异常时返回错误
+    // 让 Claude Code 显示明确的错误而不是默默截断/无限重试
+    if content.is_empty() && stop_reason == "end_turn" {
+        tracing::error!(
+            model = model,
+            input_tokens = final_input_tokens,
+            "上游返回空响应（无 content block），返回 502 错误"
+        );
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse::new(
+                "api_error",
+                "上游返回空响应：模型未生成任何内容（可能因输入过长或上游故障）。请尝试缩短对话历史或切换模型。",
+            )),
+        )
+            .into_response();
+    }
 
     // 估算输出 tokens
     let output_tokens = token::estimate_output_tokens(&content);
