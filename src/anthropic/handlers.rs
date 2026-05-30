@@ -653,6 +653,17 @@ async fn handle_non_stream_request(
         }
     });
 
+    tracing::info!(
+        model = model,
+        stop_reason = %stop_reason,
+        content_blocks = content.len(),
+        text_len = text_content.len(),
+        tool_use_count = tool_uses.len(),
+        input_tokens = final_input_tokens,
+        output_tokens = output_tokens,
+        "非流式响应构建完成"
+    );
+
     (StatusCode::OK, Json(response_body)).into_response()
 }
 
