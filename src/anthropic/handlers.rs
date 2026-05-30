@@ -681,7 +681,7 @@ async fn handle_non_stream_request(
     if content.is_empty() && stop_reason == "end_turn" {
         tracing::error!(
             model = model,
-            input_tokens = final_input_tokens,
+            input_tokens = input_tokens,
             "上游返回空响应（无 content block），返回 502 错误"
         );
         return (
