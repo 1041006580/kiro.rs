@@ -461,6 +461,16 @@ impl SseStateManager {
     ) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
+        tracing::info!(
+            stop_reason = %self.get_stop_reason(),
+            active_blocks = self.active_blocks.len(),
+            has_tool_use = self.has_tool_use,
+            input_tokens = input_tokens,
+            output_tokens = output_tokens,
+            message_ended = self.message_ended,
+            "流式响应即将结束"
+        );
+
         // 关闭所有未关闭的块
         for (index, block) in self.active_blocks.iter_mut() {
             if block.started && !block.stopped {
