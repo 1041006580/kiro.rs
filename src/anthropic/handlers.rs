@@ -81,7 +81,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 4.8".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: 128000,
         },
         Model {
             id: "claude-opus-4-8-thinking".to_string(),
@@ -90,7 +90,7 @@ pub async fn get_models() -> impl IntoResponse {
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 4.8 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 64000,
+            max_tokens: 128000,
         },
         Model {
             id: "claude-opus-4-7".to_string(),
