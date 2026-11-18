@@ -80,8 +80,17 @@ Complete all chunked operations without commentary.";
 pub fn map_model(model: &str) -> Option<String> {
     let model_lower = model.to_lowercase();
 
-    if model_lower.contains("sonnet") {
-        if model_lower.contains("4-6") || model_lower.contains("4.6") {
+    if model_lower.contains("fable") {
+        // Kiro 侧 ID 为点号形式 claude-fable-5.1（实测 claude-fable-5-1 / claude-fable-5 均被上游拒绝）
+        // 目前 Kiro 仅上线 5.1 一个 Fable 版本，故与 haiku 分支一致采用无条件映射
+        Some("claude-fable-5.1".to_string())
+    } else if model_lower.contains("sonnet") {
+        // 5.5 必须先于 sonnet-5 判断：`contains("sonnet-5")` 会同时匹配 sonnet-5.5
+        if model_lower.contains("sonnet-5-5") || model_lower.contains("sonnet-5.5") {
+            Some("claude-sonnet-5.5".to_string())
+        } else if model_lower.contains("sonnet-5") {
+            Some("claude-sonnet-5".to_string())
+        } else if model_lower.contains("4-6") || model_lower.contains("4.6") {
             Some("claude-sonnet-4.6".to_string())
         } else if model_lower.contains("4-5") || model_lower.contains("4.5") {
             Some("claude-sonnet-4.5".to_string())
@@ -89,7 +98,12 @@ pub fn map_model(model: &str) -> Option<String> {
             None
         }
     } else if model_lower.contains("opus") {
-        if model_lower.contains("4-5") || model_lower.contains("4.5") {
+        // 5.5 必须先于 opus-5 判断：`contains("opus-5")` 会同时匹配 opus-5.5
+        if model_lower.contains("opus-5-5") || model_lower.contains("opus-5.5") {
+            Some("claude-opus-5.5".to_string())
+        } else if model_lower.contains("opus-5") {
+            Some("claude-opus-5".to_string())
+        } else if model_lower.contains("4-5") || model_lower.contains("4.5") {
             Some("claude-opus-4.5".to_string())
         } else if model_lower.contains("4-6") || model_lower.contains("4.6") {
             Some("claude-opus-4.6".to_string())
@@ -111,10 +125,22 @@ pub fn map_model(model: &str) -> Option<String> {
 ///
 /// 复用 `map_model` 的映射逻辑，确保窗口大小判断与模型映射一致。
 /// Kiro 于 2026-03-24 将 Opus 4.6 和 Sonnet 4.6 升级至 1M 上下文。
-/// 4.7 / 4.8 同 1M
+/// Sonnet 5 / 5.5 / Opus 4.7 / 4.8 / Opus 5 / 5.5 / Fable 5.1 同 1M
 pub fn get_context_window_size(model: &str) -> i32 {
     match map_model(model) {
-        Some(mapped) if mapped == "claude-sonnet-4.6" || mapped == "claude-opus-4.6" || mapped == "claude-opus-4.7" || mapped == "claude-opus-4.8" => 1_000_000,
+        Some(mapped)
+            if mapped == "claude-fable-5.1"
+                || mapped == "claude-sonnet-5.5"
+                || mapped == "claude-sonnet-5"
+                || mapped == "claude-opus-5.5"
+                || mapped == "claude-opus-5"
+                || mapped == "claude-sonnet-4.6"
+                || mapped == "claude-opus-4.6"
+                || mapped == "claude-opus-4.7"
+                || mapped == "claude-opus-4.8" =>
+        {
+            1_000_000
+        }
         _ => 200_000,
     }
 }
@@ -371,7 +397,11 @@ fn process_message_content(
                         }
                         "tool_result" => {
                             if let Some(tool_use_id) = block.tool_use_id {
-                                let result_content = extract_tool_result_content(&block.content);
+                                // tool_result 内容中可能夹带 image 块（例如读取图片文件的工具），
+                                // 需一并提取，否则图片会被静默丢弃
+                                let (result_content, result_images) =
+                                    extract_tool_result_content(&block.content);
+                                images.extend(result_images);
                                 let is_error = block.is_error.unwrap_or(false);
 
                                 let mut result = if is_error {
@@ -411,21 +441,48 @@ fn get_image_format(media_type: &str) -> Option<String> {
 }
 
 /// 提取工具结果内容
-fn extract_tool_result_content(content: &Option<serde_json::Value>) -> String {
-    match content {
+///
+/// 返回 (文本内容, 图片列表)。
+///
+/// tool_result 的 content 数组里除 text 块外，还可能包含 image 块——
+/// 例如读取图片文件、渲染 PDF 页、浏览器截图这类工具的返回。Kiro 的
+/// ToolResult 结构只承载文本，故此处把 image 块单独提出来，由调用方
+/// 合并进 UserInputMessage.images 一起上送，避免图片被静默丢弃。
+fn extract_tool_result_content(
+    content: &Option<serde_json::Value>,
+) -> (String, Vec<KiroImage>) {
+    let mut images = Vec::new();
+    let text = match content {
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(serde_json::Value::Array(arr)) => {
             let mut parts = Vec::new();
             for item in arr {
                 if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
                     parts.push(text.to_string());
+                    continue;
+                }
+                // 形如 {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}
+                if item.get("type").and_then(|v| v.as_str()) == Some("image") {
+                    if let Some(source) = item.get("source") {
+                        let media_type = source
+                            .get("media_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        let data = source.get("data").and_then(|v| v.as_str());
+                        if let (Some(format), Some(data)) =
+                            (get_image_format(media_type), data)
+                        {
+                            images.push(KiroImage::from_base64(format, data));
+                        }
+                    }
                 }
             }
             parts.join("\n")
         }
         Some(v) => v.to_string(),
         None => String::new(),
-    }
+    };
+    (text, images)
 }
 
 /// 验证并过滤 tool_use/tool_result 配对
@@ -900,25 +957,28 @@ mod tests {
 
     #[test]
     fn test_map_model_sonnet() {
-        assert!(
-            map_model("claude-sonnet-4-20250514")
-                .unwrap()
-                .contains("sonnet")
-        );
-        assert!(
-            map_model("claude-3-5-sonnet-20241022")
-                .unwrap()
-                .contains("sonnet")
-        );
+        for (model, expected) in [
+            ("claude-sonnet-4-5-20250929", "claude-sonnet-4.5"),
+            ("claude-sonnet-4.5", "claude-sonnet-4.5"),
+            ("claude-sonnet-4-6", "claude-sonnet-4.6"),
+            ("claude-sonnet-4.6", "claude-sonnet-4.6"),
+        ] {
+            assert_eq!(map_model(model), Some(expected.to_string()), "{model}");
+        }
     }
 
     #[test]
     fn test_map_model_opus() {
-        assert!(
-            map_model("claude-opus-4-20250514")
-                .unwrap()
-                .contains("opus")
-        );
+        for (model, expected) in [
+            ("claude-opus-4-5-20251101", "claude-opus-4.5"),
+            ("claude-opus-4.5", "claude-opus-4.5"),
+            ("claude-opus-4-6", "claude-opus-4.6"),
+            ("claude-opus-4.6", "claude-opus-4.6"),
+            ("claude-opus-4-7", "claude-opus-4.7"),
+            ("claude-opus-4.7", "claude-opus-4.7"),
+        ] {
+            assert_eq!(map_model(model), Some(expected.to_string()), "{model}");
+        }
     }
 
     #[test]
@@ -932,7 +992,16 @@ mod tests {
 
     #[test]
     fn test_map_model_unsupported() {
-        assert!(map_model("gpt-4").is_none());
+        for model in [
+            "gpt-4",
+            "claude-sonnet-4",
+            "claude-sonnet-4-20250514",
+            "claude-3-5-sonnet-20241022",
+            "claude-opus-4",
+            "claude-opus-4-20250514",
+        ] {
+            assert_eq!(map_model(model), None, "{model}");
+        }
     }
 
     #[test]
@@ -978,6 +1047,111 @@ mod tests {
     }
 
     #[test]
+    fn test_map_model_sonnet_5_5() {
+        for name in [
+            "claude-sonnet-5-5",
+            "claude-sonnet-5.5",
+            "claude-sonnet-5-5-thinking",
+            "claude-sonnet-5.5-20260928",
+        ] {
+            assert_eq!(
+                map_model(name),
+                Some("claude-sonnet-5.5".to_string()),
+                "{name} should map to claude-sonnet-5.5"
+            );
+        }
+        assert_eq!(get_context_window_size("claude-sonnet-5-5"), 1_000_000);
+        // sonnet-5 不应被 5.5 分支吞掉
+        assert_eq!(
+            map_model("claude-sonnet-5"),
+            Some("claude-sonnet-5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_map_model_sonnet_5() {
+        assert_eq!(
+            map_model("claude-sonnet-5"),
+            Some("claude-sonnet-5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-5-thinking"),
+            Some("claude-sonnet-5".to_string())
+        );
+        assert_eq!(get_context_window_size("claude-sonnet-5"), 1_000_000);
+        // sonnet-4-5 不应误匹配为 sonnet-5
+        assert_eq!(
+            map_model("claude-sonnet-4-5-20250929"),
+            Some("claude-sonnet-4.5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_map_model_fable_5_1() {
+        // Anthropic 侧连字符形式（客户端实际发送的名字）
+        assert_eq!(
+            map_model("claude-fable-5-1"),
+            Some("claude-fable-5.1".to_string())
+        );
+        // Kiro 侧点号形式
+        assert_eq!(
+            map_model("claude-fable-5.1"),
+            Some("claude-fable-5.1".to_string())
+        );
+        // thinking 后缀不影响映射
+        assert_eq!(
+            map_model("claude-fable-5-1-thinking"),
+            Some("claude-fable-5.1".to_string())
+        );
+        assert_eq!(get_context_window_size("claude-fable-5-1"), 1_000_000);
+        // fable 分支不应影响其他系列
+        assert_eq!(
+            map_model("claude-opus-5"),
+            Some("claude-opus-5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_map_model_opus_5_5() {
+        for name in [
+            "claude-opus-5-5",
+            "claude-opus-5.5",
+            "claude-opus-5-5-thinking",
+            "claude-opus-5.5-20260922",
+        ] {
+            assert_eq!(
+                map_model(name),
+                Some("claude-opus-5.5".to_string()),
+                "{name} should map to claude-opus-5.5"
+            );
+        }
+        assert_eq!(get_context_window_size("claude-opus-5-5"), 1_000_000);
+        // opus-5 不应被 5.5 分支吞掉
+        assert_eq!(
+            map_model("claude-opus-5"),
+            Some("claude-opus-5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_map_model_opus_5() {
+        assert_eq!(
+            map_model("claude-opus-5"),
+            Some("claude-opus-5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-opus-5-thinking"),
+            Some("claude-opus-5".to_string())
+        );
+        assert_eq!(get_context_window_size("claude-opus-5"), 1_000_000);
+        // opus-4-5 不应误匹配为 opus-5
+        assert_eq!(
+            map_model("claude-opus-4-5-20251101"),
+            Some("claude-opus-4.5".to_string())
+        );
+    }
+
+    #[test]
     fn test_map_model_opus_4_8() {
         // opus 4-8 映射到 claude-opus-4.8
         let result = map_model("claude-opus-4-8-20260605");
@@ -996,6 +1170,7 @@ mod tests {
         // opus 4.8 点号写法映射到 claude-opus-4.8
         let result = map_model("claude-opus-4.8");
         assert_eq!(result, Some("claude-opus-4.8".to_string()));
+        assert_eq!(get_context_window_size("claude-opus-4-8"), 1_000_000);
     }
 
     #[test]
@@ -1009,7 +1184,7 @@ mod tests {
     fn test_determine_chat_trigger_type() {
         // 无工具时返回 MANUAL
         let req = MessagesRequest {
-            model: "claude-sonnet-4".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
             max_tokens: 1024,
             messages: vec![],
             stream: false,
@@ -1113,7 +1288,7 @@ mod tests {
         schema.insert("properties".to_string(), serde_json::json!({}));
 
         let req = MessagesRequest {
-            model: "claude-sonnet-4".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
             max_tokens: 1024,
             messages: vec![
                 AnthropicMessage {
@@ -1163,7 +1338,7 @@ mod tests {
         schema.insert("properties".to_string(), serde_json::json!({}));
 
         let req = MessagesRequest {
-            model: "claude-sonnet-4".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
             max_tokens: 1024,
             messages: vec![
                 AnthropicMessage {
@@ -1226,7 +1401,7 @@ mod tests {
 
         // 创建一个请求，历史中有工具使用，但 tools 列表为空
         let req = MessagesRequest {
-            model: "claude-sonnet-4".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
             max_tokens: 1024,
             messages: vec![
                 AnthropicMessage {
@@ -1325,7 +1500,7 @@ mod tests {
 
         // 测试带有 metadata 的请求，应该使用 session UUID 作为 conversationId
         let req = MessagesRequest {
-            model: "claude-sonnet-4".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
             max_tokens: 1024,
             messages: vec![AnthropicMessage {
                 role: "user".to_string(),
@@ -1357,7 +1532,7 @@ mod tests {
 
         // 测试没有 metadata 的请求，应该生成新的 UUID
         let req = MessagesRequest {
-            model: "claude-sonnet-4".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
             max_tokens: 1024,
             messages: vec![AnthropicMessage {
                 role: "user".to_string(),
@@ -1764,7 +1939,7 @@ mod tests {
         use super::super::types::Message as AnthropicMessage;
 
         let req = MessagesRequest {
-            model: "claude-sonnet-4".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
             max_tokens: 1024,
             messages: vec![
                 AnthropicMessage {

@@ -75,22 +75,112 @@ pub async fn get_models() -> impl IntoResponse {
 
     let models = vec![
         Model {
+            id: "claude-fable-5-1".to_string(),
+            object: "model".to_string(),
+            created: 1756684800, // Sep 1, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Fable 5.1".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-fable-5-1-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1756684800, // Sep 1, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Fable 5.1 (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-opus-5-5".to_string(),
+            object: "model".to_string(),
+            created: 1790035200, // Sep 22, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Opus 5.5".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-opus-5-5-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1790035200, // Sep 22, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Opus 5.5 (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-opus-5".to_string(),
+            object: "model".to_string(),
+            created: 1782777600, // Jun 30, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Opus 5".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-opus-5-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1782777600, // Jun 30, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Opus 5 (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-sonnet-5-5".to_string(),
+            object: "model".to_string(),
+            created: 1790553600, // Sep 28, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Sonnet 5.5".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-sonnet-5-5-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1790553600, // Sep 28, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Sonnet 5.5 (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-sonnet-5".to_string(),
+            object: "model".to_string(),
+            created: 1782777600, // Jun 30, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Sonnet 5".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-sonnet-5-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1782777600, // Jun 30, 2026
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Sonnet 5 (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
             id: "claude-opus-4-8".to_string(),
             object: "model".to_string(),
-            created: 1780704000, // Jun 5, 2026
+            created: 1779897600, // May 28, 2026
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 4.8".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128000,
+            max_tokens: 128_000,
         },
         Model {
             id: "claude-opus-4-8-thinking".to_string(),
             object: "model".to_string(),
-            created: 1780704000, // Jun 5, 2026
+            created: 1779897600, // May 28, 2026
             owned_by: "anthropic".to_string(),
             display_name: "Claude Opus 4.8 (Thinking)".to_string(),
             model_type: "chat".to_string(),
-            max_tokens: 128000,
+            max_tokens: 128_000,
         },
         Model {
             id: "claude-opus-4-7".to_string(),
@@ -740,12 +830,15 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         return;
     }
 
-    let is_opus_adaptive = model_lower.contains("opus")
+    let is_adaptive_thinking = (model_lower.contains("opus")
         && (model_lower.contains("4-6") || model_lower.contains("4.6")
             || model_lower.contains("4-7") || model_lower.contains("4.7")
-            || model_lower.contains("4-8") || model_lower.contains("4.8"));
+            || model_lower.contains("4-8") || model_lower.contains("4.8")))
+        || model_lower.contains("sonnet-5")
+        || model_lower.contains("opus-5")
+        || model_lower.contains("fable");
 
-    let thinking_type = if is_opus_adaptive {
+    let thinking_type = if is_adaptive_thinking {
         "adaptive"
     } else {
         "enabled"
@@ -762,7 +855,7 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         budget_tokens: 20000,
     });
 
-    if is_opus_adaptive {
+    if is_adaptive_thinking {
         payload.output_config = Some(OutputConfig {
             effort: "high".to_string(),
         });
